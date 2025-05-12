@@ -25,6 +25,7 @@ pub struct CursorManager {
     size: u8,
     current_cursor: CursorImageStatus,
     named_cursor_cache: RefCell<XCursorCache>,
+    pub mouse_shake_samples: RefCell<MouseShakeSamples>,
 }
 
 impl CursorManager {
@@ -38,6 +39,7 @@ impl CursorManager {
             size,
             current_cursor: CursorImageStatus::default_named(),
             named_cursor_cache: Default::default(),
+            mouse_shake_samples: Default::default(),
         }
     }
 
@@ -314,5 +316,124 @@ impl XCursor {
     /// Get hotspot for the given `image`.
     pub fn hotspot(image: &Image) -> Point<i32, Physical> {
         (image.xhot as i32, image.yhot as i32).into()
+    }
+}
+
+/// Shake cursor to enlarge it.
+pub struct MouseShakeSamples {
+    /// Old samples: (position, time, distance)
+    /// 
+    /// A ring.
+    ///
+    /// we need at least one second samples, so it
+    /// should has the size equals to the refresh rate.
+    /// Resize when ouputs' max refresh rate changed.
+    samples: Vec<(Point<f64, Logical>, u32, f64)>,
+    
+    /// Current samples index.
+    index: usize,
+
+    /// Cached scale.
+    scale: f64,
+
+    /// User is shaking the mouse.
+    started: bool,
+
+    /// Timeout.
+    end: u32,
+}
+
+impl Default for MouseShakeSamples {
+    fn default() -> Self {
+        Self {
+            samples: Default::default(),
+            index: 0,
+            scale: 1.0,
+            started: false,
+            end: 0,
+        }
+    }
+}
+
+// Now I just copy the idea from here, but with time.
+//   https://github.com/VirtCode/hypr-dynamic-cursors/blob/1aabd346eb7ad12a614fd18d095d13422d8b95b4/src/other/Shake.cpp
+impl MouseShakeSamples {
+    // Some constants.
+    const PTHRESHOLD: f64 = 4.;
+    const PBASE: f64 = 4.0;
+    const PINFLUENCE: f64 = 1.;
+    const PLIMIT: f64 = 512.0;
+    const PTIMEOUT: u32 = 500;
+    const PSPEED: f64 = 20.0;
+    const PSAMPLES_TIME: u32 = 1500;
+
+    #[inline(always)]
+    fn distance(p1: Point<f64, Logical>, p2: Point<f64, Logical>) -> f64 {
+        ((p1.x - p2.x).powi(2) + (p1.y - p2.y).powi(2)).sqrt()
+    }
+
+    pub fn calc_shake_scale(
+        &mut self,
+        sample_size: usize,
+        new_pos: Point<f64, Logical>,
+        enter_time: u32,
+    ) -> f64 {
+        if self.started && self.end < enter_time {
+            self.scale = 1.;
+            self.started = false;
+        } else {
+            if sample_size != self.samples.len() {
+                self.samples.resize(sample_size, (Point::default(), 0, 0.));
+                self.index = self.index.min(sample_size - 1);
+            }
+
+            let old = if self.index == 0 {
+                sample_size - 1
+            } else {
+                self.index - 1
+            };
+
+            let (old_pos, _, _) = self.samples[old];
+            self.samples[self.index] = (new_pos, enter_time, Self::distance(new_pos, old_pos));
+            self.index = (self.index + 1) % self.samples.len();
+
+            let trail: f64 = self
+                .samples
+                .iter()
+                .filter(|(_, ts, _)| *ts > enter_time.saturating_sub(Self::PSAMPLES_TIME))
+                .map(|(_, _, d)| d)
+                .sum();
+
+            let mut left = f64::MAX;
+            let mut right = f64::MIN;
+            let mut top = f64::MAX;
+            let mut bottom = f64::MIN;
+
+            for (s, _, _) in self
+                .samples
+                .iter()
+                .filter(|(_, ts, _)| *ts > enter_time.saturating_sub(Self::PSAMPLES_TIME))
+            {
+                left = left.min(s.x);
+                right = right.max(s.x);
+                top = top.min(s.y);
+                bottom = bottom.max(s.y);
+            }
+
+            let diagonal = Self::distance(Point::from((left, top)), Point::from((right, bottom)));
+            let amount = (trail / diagonal) - Self::PTHRESHOLD;
+            if amount > 0. && diagonal > 100. {
+                let delta = 1. / sample_size as f64;
+                if !self.started {
+                    self.scale = Self::PBASE;
+                }
+                self.scale += delta * (Self::PSPEED + (amount * amount) * Self::PINFLUENCE);
+                self.scale = self.scale.min(Self::PLIMIT);
+                self.end = enter_time + Self::PTIMEOUT;
+                self.started = true;
+            }
+        }
+
+        self.scale
     }
 }
