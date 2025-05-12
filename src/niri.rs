@@ -3537,6 +3537,7 @@ impl Niri {
         let render_cursor = self.cursor_manager.get_render_cursor(cursor_scale);
 
         let output_scale = Scale::from(output.current_scale().fractional_scale());
+        let shake_scale = self.calc_shake_scale(pointer_pos);
 
         let mut pointer_elements = match render_cursor {
             RenderCursor::Hidden => vec![],
@@ -3581,6 +3582,7 @@ impl Niri {
                     }
                 };
                 if let Some(element) = pointer_element {
+                    // Maybe we could use RescaleRenderElement here?
                     pointer_elements.push(OutputRenderElements::NamedPointer(element));
                 }
 
@@ -3602,6 +3604,30 @@ impl Niri {
         }
 
         pointer_elements
+    }
+
+    fn calc_shake_scale(&self, pos: Point<f64, Logical>) -> f64 {
+        let output_max_hz = self
+            .global_space
+            .outputs()
+            .map(|e| e.modes())
+            .flat_map(|v| v)
+            .map(|o| o.refresh / 1000)
+            .max()
+            .unwrap_or(1)
+            .max(1);
+
+        let shake_scale = self
+            .cursor_manager
+            .mouse_shake_samples
+            .borrow_mut()
+            .calc_shake_scale(
+                output_max_hz as usize,
+                pos,
+                self.start_time.elapsed().as_millis() as u32,
+            );
+
+        shake_scale
     }
 
     pub fn refresh_pointer_outputs(&mut self) {
